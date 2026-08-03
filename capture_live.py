@@ -19,17 +19,22 @@ import requests
 from playwright.sync_api import sync_playwright
 
 CHANNEL_LIVE_URL = "https://www.youtube.com/@예봄교회0828/live"
-ENV_PATH = Path.home() / ".claude/yebom-youtube/.env"
-OUT_ROOT = Path.home() / ".claude/yebom-youtube/captures"
 
-CHURCH_DIR = (
+HERE = Path(__file__).resolve().parent
+ENV_PATH = HERE / ".env"
+OUT_ROOT = HERE / "captures"
+
+GENERATE_SCRIPT = HERE / "generate_thumbnail.py"
+LOGO_PATH = HERE / "assets" / "logo.png"
+
+# 클라우드 실행 환경에는 사용자 로컬 Google Drive가 마운트되어 있지 않다.
+# 있으면(로컬 실행 시) 거기에도 저장하고, 없으면(클라우드 실행 시) 건너뛰고
+# 텔레그램으로 전송된 파일이 사실상의 아카이브가 된다.
+TIMELINE_DIR = (
     Path.home()
     / "Library/CloudStorage/GoogleDrive-john981414@gmail.com"
-    / "내 드라이브/00. GD_mac/claude/예봄교회"
+    / "내 드라이브/00. GD_mac/claude/예봄교회/01. 유튜브 썸네일 : 타임라인"
 )
-GENERATE_SCRIPT = CHURCH_DIR / "02. 썸네일 자동생성 스크립트/generate_thumbnail.py"
-LOGO_PATH = CHURCH_DIR / "00. 예봄교회 로고/24.Yebom_logo_W.png"
-TIMELINE_DIR = CHURCH_DIR / "01. 유튜브 썸네일 : 타임라인"
 
 POLL_TIMEOUT_S = 2 * 60 * 60  # 버튼 대기 최대 2시간
 POLL_INTERVAL_S = 3
@@ -157,6 +162,15 @@ def send_photo(env, path, caption=None, reply_markup=None):
         data["reply_markup"] = json.dumps(reply_markup)
     with open(path, "rb") as f:
         requests.post(f"{tg_base(env)}/sendPhoto", data=data, files={"photo": f})
+
+
+def send_document(env, path, caption=None):
+    """원본 화질 그대로 파일로 전송 (sendPhoto는 압축되므로 아카이브용으로는 이걸 사용)."""
+    data = {"chat_id": env.get("TELEGRAM_CHAT_ID")}
+    if caption:
+        data["caption"] = caption
+    with open(path, "rb") as f:
+        requests.post(f"{tg_base(env)}/sendDocument", data=data, files={"document": f})
 
 
 def answer_callback(env, callback_query_id, text=None):
@@ -299,8 +313,16 @@ def main():
         return
 
     answer_callback(env, cq_id, "저장 중...")
-    final_path = TIMELINE_DIR / f"{info['sermon_date']}.jpg"
-    final_path.write_bytes(preview_path.read_bytes())
+    saved_to_drive = TIMELINE_DIR.exists()
+    if saved_to_drive:
+        final_path = TIMELINE_DIR / f"{info['sermon_date']}.jpg"
+        final_path.write_bytes(preview_path.read_bytes())
+    else:
+        # 클라우드 실행: 로컬 Google Drive 폴더가 없으므로 임시 경로만 사용하고
+        # 완성 파일은 텔레그램 문서 전송이 사실상의 전달/보관 수단이 된다.
+        final_path = out_dir / f"{info['sermon_date']}.jpg"
+        final_path.write_bytes(preview_path.read_bytes())
+        send_document(env, final_path, caption=f"{final_path.name} (원본 화질, 직접 다운받아 보관하세요)")
 
     youtube_ready = all(
         env.get(k) for k in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN")

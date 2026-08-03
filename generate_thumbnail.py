@@ -3,10 +3,11 @@
 '01. 유튜브 썸네일 : 타임라인/00. psd/20260503 설교 썸네일.psd' 원본 포토샵 파일을
 직접 파싱해서 얻은 실제 좌표·폰트·크기를 그대로 사용한다 (추정치 아님).
 """
+import os
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 W, H = 1280, 720
-FONT_DIR = "/Users/choieunkang/Library/Fonts"
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 LEFT_X = 187
 
 # PSD 레이어 bbox 실측값 기준 그리드
