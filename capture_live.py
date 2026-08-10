@@ -1,16 +1,24 @@
-"""예봄교회 유튜브 라이브 캡처 + 텔레그램 버튼 승인 스크립트.
+"""예봄교회 유튜브 썸네일 캡처 + 텔레그램 버튼 승인 스크립트.
 
-Claude Code와 무관하게 단독 실행 가능. launchd가 매주 일요일 13:00에 실행한다.
+Claude Code와 무관하게 단독 실행 가능. 매주 일요일 13:03(KST)에 클라우드 routine이 실행한다.
+
+중요: 예배는 11:00~12:30에 진행되고 13:00은 방송이 "끝난 뒤"다. 그래서 이 스크립트는
+라이브 스트림을 잡는 게 아니라, 이미 종료되어 일반 다시보기(VOD)가 된 "오늘자 영상"을
+채널에서 찾아 그 안에서 설교 구간을 찾아 스틸컷을 뜬다.
 
 흐름:
-  1) 라이브 접속(최대 15분 재시도) → 후보 스틸컷 5장 캡처 → 제목에서 설교 정보 파싱
-  2) 텔레그램으로 후보 사진 5장 전송, 각 사진에 "이 사진 선택" 버튼 부착
-  3) 버튼 클릭을 최대 2시간 폴링 → 선택되면 generate_thumbnail.py로 최종 이미지 합성
-  4) 최종 이미지를 "승인"/"거절" 버튼과 함께 전송 → 승인 시 실제 타임라인 폴더에 저장
+  1) 채널에서 오늘 날짜(YYYYMMDD)가 제목에 들어간 최신 영상을 탐색 (최대 20분 재시도 —
+     방송 종료 직후 YouTube가 다시보기로 전환 처리하는 데 시간이 걸릴 수 있음)
+  2) 영상 길이 기준 35~75% 구간(설교가 보통 있는 구간)에서 후보 스틸컷 5장 캡처,
+     제목에서 설교 정보 파싱
+  3) 텔레그램으로 후보 사진 5장 전송, 각 사진에 "이 사진 선택" 버튼 부착
+  4) 버튼 클릭을 최대 2시간 폴링 → 선택되면 generate_thumbnail.py로 최종 이미지 합성
+  5) 최종 이미지를 "승인"/"거절" 버튼과 함께 전송 → 승인 시 실제 타임라인 폴더에 저장
      (YouTube API 자격증명이 준비되면 자동 업로드까지, 아직이면 수동 업로드 안내)
 """
 import importlib.util
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +26,10 @@ from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
-CHANNEL_LIVE_URL = "https://www.youtube.com/@예봄교회0828/live"
+CHANNEL_STREAMS_URL = "https://www.youtube.com/@예봄교회0828/streams"
+# 설교가 보통 위치하는 구간 (지난 영상들 기준 실측: 영상 길이의 35%~75% 지점)
+SERMON_FRACTIONS = [0.35, 0.45, 0.55, 0.65, 0.75]
+DEFAULT_DURATION_S = 5400  # duration을 못 읽었을 때 쓸 기본값 (약 90분)
 
 HERE = Path(__file__).resolve().parent
 ENV_PATH = HERE / ".env"
@@ -64,25 +75,40 @@ def dismiss_consent(page):
             pass
 
 
-def wait_for_live(page, max_wait_s=900, poll_s=30):
-    """13시 정각엔 라이브가 아직 안 켜졌을 수 있으니 최대 15분까지 재시도.
+def find_todays_video(page, today):
+    """채널의 다시보기 목록에서 제목에 오늘 날짜가 들어간 영상을 찾는다."""
+    page.goto(CHANNEL_STREAMS_URL, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(3000)
+    dismiss_consent(page)
+    html = page.content()
+    ids = []
+    for vid in re.findall(r'"videoId":"([\w-]{11})"', html):
+        if vid not in ids:
+            ids.append(vid)
+    for vid in ids[:8]:
+        page.goto(f"https://www.youtube.com/watch?v={vid}", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(2000)
+        info = extract_info(page)
+        if info.get("sermon_date") == today:
+            return info
+    return None
 
-    네트워크 타임아웃 등 goto 자체의 실패도 '아직 라이브 아님'과 동일하게 재시도한다
-    (2026-08-02: 첫 goto가 타임아웃으로 예외를 던지면서 재시도 없이 통째로 죽은 버그 수정).
-    """
+
+def wait_for_todays_video(page, max_wait_s=1200, poll_s=120):
+    """방송 종료 직후엔 YouTube가 다시보기로 전환하는 데 시간이 걸릴 수 있어
+    최대 20분까지 재시도한다. goto 자체의 네트워크 오류도 재시도 대상으로 취급한다."""
+    today = datetime.now().strftime("%Y%m%d")
     waited = 0
     while waited <= max_wait_s:
         try:
-            page.goto(CHANNEL_LIVE_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
-            dismiss_consent(page)
-            if "/watch" in page.url:
-                return True
+            found = find_todays_video(page, today)
+            if found:
+                return found
         except Exception as e:
-            print(f"wait_for_live 재시도 중 오류(무시하고 계속): {e}")
+            print(f"오늘자 영상 탐색 중 오류(무시하고 재시도): {e}")
         waited += poll_s
         time.sleep(poll_s)
-    return False
+    return None
 
 
 def extract_info(page):
@@ -119,20 +145,43 @@ def extract_info(page):
     }
 
 
-def capture_stills(page, out_dir, count=5, interval_s=4):
-    """유튜브 컨트롤 바(재생바/버튼)는 마우스가 몇 초간 안 움직이면 자동으로
-    사라진다. 확장 프로그램 없이도 마우스를 플레이어 밖으로 옮기고 기다리면
-    컨트롤 없는 깨끗한 프레임을 캡처할 수 있다."""
+def capture_stills_from_vod(page, video_id, out_dir):
+    """다시보기 영상의 여러 시점(SERMON_FRACTIONS)으로 이동하며 스틸컷을 뜬다.
+
+    유튜브 컨트롤 바(재생바/버튼)는 마우스가 몇 초간 안 움직이면 자동으로 사라진다.
+    확장 프로그램 없이도 마우스를 플레이어 밖으로 옮기고 기다리면 컨트롤 없는
+    깨끗한 프레임을 캡처할 수 있다.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    page.goto(f"https://www.youtube.com/watch?v={video_id}", wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(3000)
+    dismiss_consent(page)
+    try:
+        duration = page.evaluate("document.querySelector('video')?.duration")
+    except Exception:
+        duration = None
+    if not duration or duration < 60:
+        duration = DEFAULT_DURATION_S
+
+    timestamps = [int(duration * f) for f in SERMON_FRACTIONS]
+
     paths = []
-    video = page.locator("video").first
-    for i in range(count):
-        page.wait_for_timeout(interval_s * 1000)
+    for i, t in enumerate(timestamps, start=1):
+        page.goto(f"https://www.youtube.com/watch?v={video_id}&t={t}s", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(4000)
+        dismiss_consent(page)
+        try:
+            page.evaluate("document.querySelector('video')?.play()")
+        except Exception:
+            pass
+        page.wait_for_timeout(2000)
         # 마우스를 플레이어 바깥(좌상단 구석)으로 이동시켜 컨트롤 바가
         # 자동으로 숨겨지도록 유도
         page.mouse.move(2, 2)
         page.wait_for_timeout(3500)
-        path = out_dir / f"candidate_{i + 1}.jpg"
+        path = out_dir / f"candidate_{i}.jpg"
+        video = page.locator("video").first
         try:
             video.screenshot(path=str(path), type="jpeg", quality=95)
         except Exception:
@@ -234,18 +283,17 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1600, "height": 900})
 
-        if not wait_for_live(page):
+        info = wait_for_todays_video(page)
+        if not info:
             send_message(
                 env,
-                "예봄교회 유튜브 라이브를 15분 넘게 기다렸는데 아직 시작되지 않았어요. "
-                "나중에 Claude Code에서 직접 확인해주세요.",
+                "오늘자 영상을 20분 넘게 기다렸는데 아직 채널에 안 보여요 "
+                "(다시보기 전환이 늦어지고 있을 수 있어요). Claude Code에서 직접 확인해주세요.",
             )
             browser.close()
             return
 
-        page.wait_for_timeout(5000)
-        info = extract_info(page)
-        photos = capture_stills(page, out_dir)
+        photos = capture_stills_from_vod(page, info["video_id"], out_dir)
         browser.close()
 
     (out_dir / "info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2))
@@ -339,7 +387,7 @@ def main():
         except Exception as e:
             send_message(env, f"저장은 됐는데 유튜브 업로드에서 오류가 났어요: {e}\nClaude Code에서 확인해주세요.")
     elif youtube_ready:
-        send_message(env, f"저장 완료: {final_path.name}\n(오늘 라이브 video_id를 못 찾아서 자동 업로드는 건너뛰었어요. 스튜디오에서 직접 업로드해주세요.)")
+        send_message(env, f"저장 완료: {final_path.name}\n(오늘자 영상 ID를 못 찾아서 자동 업로드는 건너뛰었어요. 스튜디오에서 직접 업로드해주세요.)")
     else:
         send_message(env, f"저장 완료: {final_path.name}\n유튜브 스튜디오에서 직접 업로드해주세요 (API 자동 업로드는 아직 미설정).")
 
