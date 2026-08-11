@@ -279,6 +279,10 @@ def main():
     today = datetime.now().strftime("%Y%m%d")
     out_dir = OUT_ROOT / today
 
+    # 진단용: 스크립트가 실제로 시작됐는지 최대한 빨리 알림 (여기까지도 안 오면
+    # 문제는 이 스크립트가 아니라 그 이전 단계 - 의존성 설치 등 - 에 있다는 뜻)
+    send_message(env, "썸네일 자동화 스크립트 시작했어요. 오늘자 영상을 찾는 중...")
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1600, "height": 900})
@@ -293,6 +297,7 @@ def main():
             browser.close()
             return
 
+        send_message(env, f"영상 찾았어요: {info['raw_title']}\n후보 사진 캡처 중...")
         photos = capture_stills_from_vod(page, info["video_id"], out_dir)
         browser.close()
 
