@@ -18,6 +18,7 @@ Claude Code와 무관하게 단독 실행 가능. 매주 일요일 13:03(KST)에
 """
 import importlib.util
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -53,8 +54,16 @@ POLL_TIMEOUT_S = 2 * 60 * 60  # 버튼 대기 최대 2시간
 POLL_INTERVAL_S = 3
 
 
+REQUIRED_ENV_KEYS = [
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN",
+]
+
+
 def load_env():
-    env = {}
+    """로컬 실행 시 .env 파일에서, GitHub Actions 등에서는 OS 환경변수(Secrets가
+    주입된 값)에서 값을 읽는다. 둘 다 있으면 .env가 우선한다."""
+    env = {k: v for k, v in ((k, os.environ.get(k)) for k in REQUIRED_ENV_KEYS) if v}
     if ENV_PATH.exists():
         for line in ENV_PATH.read_text().splitlines():
             line = line.strip()
