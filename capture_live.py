@@ -9,8 +9,8 @@ Claude Code와 무관하게 단독 실행 가능. 매주 일요일 13:03(KST)에
 흐름:
   1) 채널에서 오늘 날짜(YYYYMMDD)가 제목에 들어간 최신 영상을 탐색 (최대 20분 재시도 —
      방송 종료 직후 YouTube가 다시보기로 전환 처리하는 데 시간이 걸릴 수 있음)
-  2) 영상 길이 기준 35~75% 구간(설교가 보통 있는 구간)에서 후보 스틸컷 5장 캡처,
-     제목에서 설교 정보 파싱
+  2) 영상 시작 후 32~72분 구간(설교가 보통 있는 구간, 절대 시간 기준)에서
+     후보 스틸컷 5장 캡처, 제목에서 설교 정보 파싱
   3) 텔레그램으로 후보 사진 5장 전송, 각 사진에 "이 사진 선택" 버튼 부착
   4) 버튼 클릭을 최대 2시간 폴링 → 선택되면 generate_thumbnail.py로 최종 이미지 합성
   5) 최종 이미지를 "승인"/"거절" 버튼과 함께 전송 → 승인 시 실제 타임라인 폴더에 저장
@@ -27,8 +27,10 @@ import requests
 from playwright.sync_api import sync_playwright
 
 CHANNEL_STREAMS_URL = "https://www.youtube.com/@예봄교회0828/streams"
-# 설교가 보통 위치하는 구간 (지난 영상들 기준 실측: 영상 길이의 35%~75% 지점)
-SERMON_FRACTIONS = [0.35, 0.45, 0.55, 0.65, 0.75]
+# 설교가 보통 위치하는 구간: 영상 길이 비율이 아니라 "영상 시작 후 절대 시간".
+# 실측 기준(2026-08-16) 설교는 대체로 시작 후 30~40분 사이에 시작한다.
+# 그 이전(0~30분)은 찬양/광고 구간이라 안전하게 건너뛰고, 30~75분 사이에서 고른다.
+SERMON_OFFSETS_MIN = [32, 42, 52, 62, 72]
 DEFAULT_DURATION_S = 5400  # duration을 못 읽었을 때 쓸 기본값 (약 90분)
 
 HERE = Path(__file__).resolve().parent
@@ -146,7 +148,7 @@ def extract_info(page):
 
 
 def capture_stills_from_vod(page, video_id, out_dir):
-    """다시보기 영상의 여러 시점(SERMON_FRACTIONS)으로 이동하며 스틸컷을 뜬다.
+    """다시보기 영상의 여러 시점(SERMON_OFFSETS_MIN)으로 이동하며 스틸컷을 뜬다.
 
     유튜브 컨트롤 바(재생바/버튼)는 마우스가 몇 초간 안 움직이면 자동으로 사라진다.
     확장 프로그램 없이도 마우스를 플레이어 밖으로 옮기고 기다리면 컨트롤 없는
@@ -164,7 +166,11 @@ def capture_stills_from_vod(page, video_id, out_dir):
     if not duration or duration < 60:
         duration = DEFAULT_DURATION_S
 
-    timestamps = [int(duration * f) for f in SERMON_FRACTIONS]
+    # 영상이 예상보다 짧으면(예: 다음 예배 순서가 달라짐) 오프셋이 영상 길이를
+    # 넘지 않도록 duration의 85%로 상한을 둔다.
+    max_t = duration * 0.85
+    timestamps = [min(offset_min * 60, max_t) for offset_min in SERMON_OFFSETS_MIN]
+    timestamps = sorted(set(int(t) for t in timestamps))
 
     paths = []
     for i, t in enumerate(timestamps, start=1):
