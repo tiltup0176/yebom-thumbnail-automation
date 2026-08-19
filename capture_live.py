@@ -17,9 +17,11 @@ Claude Code와 무관하게 단독 실행 가능. 매주 일요일 13:03(KST)에
      (YouTube API 자격증명이 준비되면 자동 업로드까지, 아직이면 수동 업로드 안내)
 """
 import importlib.util
+import io
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +35,16 @@ CHANNEL_STREAMS_URL = "https://www.youtube.com/@예봄교회0828/streams"
 # 그 이전(0~30분)은 찬양/광고 구간이라 안전하게 건너뛰고, 30~75분 사이에서 고른다.
 SERMON_OFFSETS_MIN = [32, 42, 52, 62, 72]
 DEFAULT_DURATION_S = 5400  # duration을 못 읽었을 때 쓸 기본값 (약 90분)
+
+# [실험용] 대기화면 트림 지점 재조사(2026-08-19 계획, 아직 자동 판단 없음).
+# 8/16 영상으로는 밝기가 10분 내내 불규칙해서 판단 불가였는데, 그 영상이
+# 테스트 시점에 이미 사용자가 수동 트림한 뒤였을 가능성이 있어(원본이 아니었을
+# 수 있음) 다음 방송 때 "수동 트림 전" 원본으로 다시 확인하기로 함.
+# 여기서는 판단 없이 밝기 곡선만 뽑아 텔레그램으로 보낸다 — 사람이 보고
+# 실제 트림 지점과 비교해서 탐지 로직을 설계한다.
+TRIM_DIAG_SCAN_MAX_S = 600
+TRIM_DIAG_INTERVAL_S = 15
+TRIM_DIAG_YTDLP_CLIENT = "android"  # 기본 클라이언트는 403 남 (2026-08-19 확인)
 
 HERE = Path(__file__).resolve().parent
 ENV_PATH = HERE / ".env"
@@ -205,6 +217,55 @@ def capture_stills_from_vod(page, video_id, out_dir):
     return paths
 
 
+# ---------------- [실험용] 대기화면 트림 진단 ----------------
+
+def run_trim_diagnostic(env, video_id, out_dir):
+    """대기화면 밝기 곡선을 뽑아 텔레그램으로 보낸다. 판단/안내 없이 raw 데이터만.
+
+    실패해도 본 파이프라인(썸네일 캡처/승인/업로드)에 영향을 주면 안 되므로
+    호출부에서 반드시 try/except로 감싸고, 여기서도 각 단계를 최대한 방어적으로 짠다.
+    """
+    from PIL import Image
+
+    prefix_path = out_dir / f"trim_diag_{video_id}.mp4"
+    subprocess.run(
+        [
+            "yt-dlp",
+            "--extractor-args", f"youtube:player_client={TRIM_DIAG_YTDLP_CLIENT}",
+            "-f", "best[height<=480]",
+            "--download-sections", f"*0-{TRIM_DIAG_SCAN_MAX_S}",
+            "-o", str(prefix_path),
+            f"https://www.youtube.com/watch?v={video_id}",
+        ],
+        check=True, timeout=300, capture_output=True,
+    )
+
+    lines = []
+    for t in range(0, TRIM_DIAG_SCAN_MAX_S + 1, TRIM_DIAG_INTERVAL_S):
+        proc = subprocess.run(
+            ["ffmpeg", "-ss", str(t), "-i", str(prefix_path), "-frames:v", "1",
+             "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30,
+        )
+        try:
+            img = Image.open(io.BytesIO(proc.stdout)).convert("L")
+            px = list(img.getdata())
+            b = sum(px) / len(px)
+            lines.append(f"{t}s: {b:.0f}")
+        except Exception:
+            lines.append(f"{t}s: ?")
+
+    prefix_path.unlink(missing_ok=True)
+
+    send_message(
+        env,
+        "[실험용] 대기화면 밝기 진단 (트림 자동탐지 재검증용, 아직 판단 로직 없음)\n"
+        "스튜디오에서 트림하기 *전에* 뽑은 원본 밝기 곡선이에요. 나중에 실제로 어디까지 "
+        "잘랐는지 알려주시면 이 데이터랑 비교해서 탐지 로직을 만들게요.\n\n"
+        + "\n".join(lines),
+    )
+
+
 # ---------------- 텔레그램 ----------------
 
 def tg_base(env):
@@ -313,6 +374,14 @@ def main():
             return
 
         send_message(env, f"영상 찾았어요: {info['raw_title']}\n후보 사진 캡처 중...")
+
+        if info.get("video_id"):
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                run_trim_diagnostic(env, info["video_id"], out_dir)
+            except Exception as e:
+                print(f"[실험용] 트림 진단 실패(무시하고 계속): {e}")
+
         photos = capture_stills_from_vod(page, info["video_id"], out_dir)
         browser.close()
 
