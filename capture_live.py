@@ -124,10 +124,23 @@ def find_todays_video(page, today):
     return None
 
 
+def most_recent_sunday_str():
+    """가장 최근(오늘 포함) 주일 날짜를 YYYYMMDD로 반환.
+
+    예배는 항상 일요일이라, 스크립트를 정확히 일요일에 돌리지 않아도(수동 테스트 등)
+    "오늘 날짜"가 아니라 "가장 가까운 지난 주일"을 찾도록 한다. 실제 프로덕션 cron은
+    일요일에만 도니 이 함수는 그날엔 오늘 날짜와 동일한 값을 반환한다.
+    """
+    from datetime import timedelta
+    now = datetime.now()
+    days_since_sunday = (now.weekday() + 1) % 7  # Mon=0..Sun=6 → 일요일이면 0
+    return (now - timedelta(days=days_since_sunday)).strftime("%Y%m%d")
+
+
 def wait_for_todays_video(page, max_wait_s=1200, poll_s=120):
     """방송 종료 직후엔 YouTube가 다시보기로 전환하는 데 시간이 걸릴 수 있어
     최대 20분까지 재시도한다. goto 자체의 네트워크 오류도 재시도 대상으로 취급한다."""
-    today = datetime.now().strftime("%Y%m%d")
+    today = most_recent_sunday_str()
     waited = 0
     while waited <= max_wait_s:
         try:
