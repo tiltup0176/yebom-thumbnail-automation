@@ -65,6 +65,13 @@ TIMELINE_DIR = (
 POLL_TIMEOUT_S = 2 * 60 * 60  # 버튼 대기 최대 2시간
 POLL_INTERVAL_S = 3
 
+# 텔레그램 API 호출 타임아웃. 원래 여기 없었던 게 버그였음(2026-08-23 발견) —
+# api.telegram.org 연결이 조금만 지연돼도 requests가 무한 대기해서 워크플로
+# 전체(150분 job timeout)가 통째로 멈추는 사고가 남. sendMessage/answerCallbackQuery는
+# 텍스트라 짧게, sendPhoto/sendDocument는 업로드 시간 감안해 넉넉하게 잡는다.
+TG_TEXT_TIMEOUT_S = 30
+TG_UPLOAD_TIMEOUT_S = 60
+
 
 REQUIRED_ENV_KEYS = [
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
@@ -276,7 +283,7 @@ def send_message(env, text, reply_markup=None):
     data = {"chat_id": env.get("TELEGRAM_CHAT_ID"), "text": text}
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
-    requests.post(f"{tg_base(env)}/sendMessage", data=data)
+    requests.post(f"{tg_base(env)}/sendMessage", data=data, timeout=TG_TEXT_TIMEOUT_S)
 
 
 def send_photo(env, path, caption=None, reply_markup=None):
@@ -286,7 +293,7 @@ def send_photo(env, path, caption=None, reply_markup=None):
     if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup)
     with open(path, "rb") as f:
-        requests.post(f"{tg_base(env)}/sendPhoto", data=data, files={"photo": f})
+        requests.post(f"{tg_base(env)}/sendPhoto", data=data, files={"photo": f}, timeout=TG_UPLOAD_TIMEOUT_S)
 
 
 def send_document(env, path, caption=None):
@@ -295,14 +302,14 @@ def send_document(env, path, caption=None):
     if caption:
         data["caption"] = caption
     with open(path, "rb") as f:
-        requests.post(f"{tg_base(env)}/sendDocument", data=data, files={"document": f})
+        requests.post(f"{tg_base(env)}/sendDocument", data=data, files={"document": f}, timeout=TG_UPLOAD_TIMEOUT_S)
 
 
 def answer_callback(env, callback_query_id, text=None):
     data = {"callback_query_id": callback_query_id}
     if text:
         data["text"] = text
-    requests.post(f"{tg_base(env)}/answerCallbackQuery", data=data)
+    requests.post(f"{tg_base(env)}/answerCallbackQuery", data=data, timeout=TG_TEXT_TIMEOUT_S)
 
 
 def poll_for_callback(env, valid_data_prefixes, timeout_s):
