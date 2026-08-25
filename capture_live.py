@@ -20,6 +20,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import time
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,33 @@ POLL_INTERVAL_S = 3
 # 텍스트라 짧게, sendPhoto/sendDocument는 업로드 시간 감안해 넉넉하게 잡는다.
 TG_TEXT_TIMEOUT_S = 30
 TG_UPLOAD_TIMEOUT_S = 60
+
+STILLS_CAPTURE_TIMEOUT_S = 300  # 후보 사진 캡처 단계 전체의 강제 시간제한
+
+
+class StepTimeout(Exception):
+    pass
+
+
+def run_with_timeout(seconds, fn, *args, **kwargs):
+    """지정 시간을 넘기면 강제로 중단시킨다(SIGALRM 기반, Unix 전용).
+
+    page.evaluate() 등 Playwright의 일부 호출은 자체 timeout 인자가 없어서,
+    브라우저가 응답을 안 주면 무한 대기할 수 있음(2026-08-25 실제로 후보 사진
+    캡처 단계가 원인 불명으로 10분 넘게 멈춘 사고 발생). 어떤 호출이 원인이든
+    이 단계 전체에 상한을 걸어서, 조용히 영원히 멈추는 대신 최소한 에러로
+    실패해서 사용자에게 알림이 가도록 한다.
+    """
+    def _raise_timeout(signum, frame):
+        raise StepTimeout(f"{seconds}초 제한 시간을 초과함")
+
+    old_handler = signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.alarm(seconds)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 REQUIRED_ENV_KEYS = [
@@ -334,7 +362,9 @@ def main():
 
         send_message(env, f"영상 찾았어요: {info['raw_title']}\n후보 사진 캡처 중...")
 
-        photos = capture_stills_from_vod(page, info["video_id"], out_dir)
+        photos = run_with_timeout(
+            STILLS_CAPTURE_TIMEOUT_S, capture_stills_from_vod, page, info["video_id"], out_dir
+        )
         browser.close()
 
     (out_dir / "info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2))
