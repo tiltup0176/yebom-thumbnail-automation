@@ -33,7 +33,10 @@ jobs:
         # 요청하게 한다.
         env:
           YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
-        run: printf '%s' "$YOUTUBE_COOKIES" > youtube_cookies.txt
+        run: |
+          printf '%s' "$YOUTUBE_COOKIES" > youtube_cookies.txt
+          echo "쿠키 파일 줄 수: $(wc -l < youtube_cookies.txt)"
+          echo "첫 줄: $(head -1 youtube_cookies.txt)"
 
       - name: 캡처 + 텔레그램 연동 + 썸네일 업로드
         env:
