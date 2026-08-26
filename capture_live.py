@@ -34,7 +34,6 @@ CHANNEL_STREAMS_URL = "https://www.youtube.com/@예봄교회0828/streams"
 # 실측 기준(2026-08-16) 설교는 대체로 시작 후 30~40분 사이에 시작한다.
 # 그 이전(0~30분)은 찬양/광고 구간이라 안전하게 건너뛰고, 30~70분 사이에서 고른다.
 SERMON_OFFSETS_MIN = [30, 40, 50, 60, 70]
-DEFAULT_DURATION_S = 5400  # duration을 못 읽었을 때 쓸 기본값 (약 90분)
 
 HERE = Path(__file__).resolve().parent
 ENV_PATH = HERE / ".env"
@@ -62,7 +61,6 @@ POLL_INTERVAL_S = 3
 TG_TEXT_TIMEOUT_S = 30
 TG_UPLOAD_TIMEOUT_S = 60
 
-STILLS_CAPTURE_TIMEOUT_S = 300  # 후보 사진 캡처 단계 전체의 강제 시간제한 (subprocess 강제종료 기준)
 CAPTURE_WORKER_SCRIPT = HERE / "capture_stills_worker.py"
 
 
@@ -185,58 +183,41 @@ def extract_info(page):
     }
 
 
-def capture_stills_from_vod(page, video_id, out_dir):
-    """다시보기 영상의 여러 시점(SERMON_OFFSETS_MIN)으로 이동하며 스틸컷을 뜬다.
+SHOT_TIMEOUT_S = 90  # 후보 사진 한 장 캡처(새 프로세스+새 브라우저)당 강제 시간제한
 
-    유튜브 컨트롤 바(재생바/버튼)는 마우스가 몇 초간 안 움직이면 자동으로 사라진다.
-    확장 프로그램 없이도 마우스를 플레이어 밖으로 옮기고 기다리면 컨트롤 없는
-    깨끗한 프레임을 캡처할 수 있다.
+
+def capture_candidates(video_id, out_dir):
+    """SERMON_OFFSETS_MIN 시점마다 완전히 새 프로세스(브라우저)로 스틸컷을 하나씩 뜬다.
+
+    브라우저 하나를 재사용하며 여러 번 무거운 유튜브 페이지를 오가면 이 실행
+    환경(GitHub Actions)에서 Chromium이 통째로 멈추는 문제가 실제로 확인됨
+    (2026-08-25~26, --disable-dev-shm-usage로도 해결 안 됨. Playwright 자체
+    60초 timeout도 안 먹힘 = 브라우저/드라이버 프로세스 자체가 무응답이 됐다는
+    뜻이라 Python 코드로는 손쓸 방법이 없었음). 그래서 사진 한 장마다 완전히
+    새 subprocess(=새 브라우저)로 격리하고, 외부에서 subprocess.run(timeout=...)
+    으로 확실하게 강제종료한다. 한 장이 죽어도 나머지 캡처는 영향받지 않고,
+    최소 1장이라도 건지는 게 목표(전부 아니면 전무보다 낫다).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    print("[진행] 캡처: 영상 페이지 이동 중...")
-    page.goto(f"https://www.youtube.com/watch?v={video_id}", wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000)
-    dismiss_consent(page)
-    print("[진행] 캡처: duration 읽는 중...")
-    try:
-        duration = page.evaluate("document.querySelector('video')?.duration")
-    except Exception:
-        duration = None
-    print(f"[진행] 캡처: duration={duration}")
-    if not duration or duration < 60:
-        duration = DEFAULT_DURATION_S
-
-    # 영상이 예상보다 짧으면(예: 다음 예배 순서가 달라짐) 오프셋이 영상 길이를
-    # 넘지 않도록 duration의 85%로 상한을 둔다.
-    max_t = duration * 0.85
-    timestamps = [min(offset_min * 60, max_t) for offset_min in SERMON_OFFSETS_MIN]
-    timestamps = sorted(set(int(t) for t in timestamps))
+    timestamps = sorted(set(offset_min * 60 for offset_min in SERMON_OFFSETS_MIN))
 
     paths = []
     for i, t in enumerate(timestamps, start=1):
-        print(f"[진행] 캡처 {i}/{len(timestamps)}: t={t}s 페이지 이동...")
-        page.goto(f"https://www.youtube.com/watch?v={video_id}&t={t}s", wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
-        dismiss_consent(page)
+        path = out_dir / f"candidate_{len(paths) + 1}.jpg"
+        print(f"[진행] 캡처 {i}/{len(timestamps)}: t={t}s, 새 프로세스로 시작...")
         try:
-            page.evaluate("document.querySelector('video')?.play()")
-        except Exception:
-            pass
-        page.wait_for_timeout(2000)
-        # 마우스를 플레이어 바깥(좌상단 구석)으로 이동시켜 컨트롤 바가
-        # 자동으로 숨겨지도록 유도
-        page.mouse.move(2, 2)
-        page.wait_for_timeout(3500)
-        path = out_dir / f"candidate_{i}.jpg"
-        video = page.locator("video").first
-        print(f"[진행] 캡처 {i}/{len(timestamps)}: 스크린샷 찍는 중...")
-        try:
-            video.screenshot(path=str(path), type="jpeg", quality=95)
-        except Exception:
-            page.screenshot(path=str(path), type="jpeg", quality=95)
+            result = subprocess.run(
+                [sys.executable, str(CAPTURE_WORKER_SCRIPT), video_id, str(t), str(path)],
+                timeout=SHOT_TIMEOUT_S,
+            )
+            if result.returncode != 0:
+                print(f"[진행] 캡처 {i}/{len(timestamps)}: 워커 실패 (exit {result.returncode}), 건너뜀")
+                continue
+        except subprocess.TimeoutExpired:
+            print(f"[진행] 캡처 {i}/{len(timestamps)}: {SHOT_TIMEOUT_S}초 넘어서 강제종료, 건너뜀")
+            continue
         paths.append(path)
-        print(f"[진행] 캡처 {i}/{len(timestamps)}: 완료")
+        print(f"[진행] 캡처 {i}/{len(timestamps)}: 완료 ({len(paths)}번째 후보로 저장)")
     return paths
 
 
@@ -349,21 +330,9 @@ def main():
 
     send_message(env, f"영상 찾았어요: {info['raw_title']}\n후보 사진 캡처 중...")
 
-    # 후보 사진 캡처는 별도 프로세스에서 실행하고 subprocess.run(timeout=...)으로
-    # 외부에서 강제종료한다. Playwright 동기 API의 일부 내부 호출(page.evaluate 등)이
-    # 락/퓨처 대기 방식이라 signal.alarm으로는 못 끊는 경우가 실제로 있었음
-    # (2026-08-25~26 실행이 원인 불명으로 2시간 넘게 멈춘 사고). yt-dlp/ffmpeg에
-    # 쓰던 것과 같은, 이미 검증된 프로세스 격리 방식으로 통일.
-    out_dir.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [sys.executable, str(CAPTURE_WORKER_SCRIPT), info["video_id"], str(out_dir)],
-        timeout=STILLS_CAPTURE_TIMEOUT_S,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"후보 사진 캡처 워커가 실패함 (exit code {result.returncode})")
-    photos = sorted(out_dir.glob("candidate_*.jpg"), key=lambda p: int(p.stem.split("_")[1]))
+    photos = capture_candidates(info["video_id"], out_dir)
     if not photos:
-        raise RuntimeError("캡처 워커는 끝났는데 후보 사진 파일이 하나도 없음")
+        raise RuntimeError("후보 사진을 하나도 못 건짐 (전부 실패/타임아웃)")
 
     (out_dir / "info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2))
 
