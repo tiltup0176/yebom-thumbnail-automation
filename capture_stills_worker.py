@@ -28,36 +28,48 @@ from capture_live import dismiss_consent
 
 
 def capture_one(video_id, t, out_path):
+    print(f"[워커] launch 시작 (t={t})", flush=True)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
+        print("[워커] 브라우저 launch 완료", flush=True)
         page = browser.new_page(viewport={"width": 1600, "height": 900})
+        print("[워커] goto 시작", flush=True)
         page.goto(f"https://www.youtube.com/watch?v={video_id}", wait_until="domcontentloaded", timeout=60000)
+        print("[워커] goto 완료", flush=True)
         page.wait_for_timeout(3000)
         dismiss_consent(page)
+        print("[워커] play() 호출", flush=True)
         try:
             page.evaluate("document.querySelector('video')?.play()")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[워커] play() 예외: {e}", flush=True)
+        print("[워커] readyState 대기 시작", flush=True)
         try:
             page.wait_for_function(
                 "document.querySelector('video') && document.querySelector('video').readyState >= 2",
                 timeout=15000,
             )
-        except Exception:
-            pass  # 시간 안에 안 되면 그냥 진행 (최선을 다해본다)
+            print("[워커] readyState 도달", flush=True)
+        except Exception as e:
+            print(f"[워커] readyState 대기 타임아웃/예외: {e}", flush=True)
+        print("[워커] currentTime 설정", flush=True)
         try:
             page.evaluate(f"const v = document.querySelector('video'); if (v) v.currentTime = {t};")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[워커] currentTime 예외: {e}", flush=True)
         page.wait_for_timeout(3000)
         page.mouse.move(2, 2)
         page.wait_for_timeout(3500)
+        print("[워커] 스크린샷 시작", flush=True)
         video = page.locator("video").first
         try:
             video.screenshot(path=str(out_path), type="jpeg", quality=95)
-        except Exception:
+        except Exception as e:
+            print(f"[워커] video.screenshot 예외: {e}", flush=True)
             page.screenshot(path=str(out_path), type="jpeg", quality=95)
+        print("[워커] 스크린샷 완료", flush=True)
         browser.close()
+        print("[워커] 브라우저 종료", flush=True)
 
 
 def main():
