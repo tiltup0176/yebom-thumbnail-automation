@@ -189,14 +189,15 @@ SHOT_TIMEOUT_S = 90  # 후보 사진 한 장 캡처(새 프로세스+새 브라�
 def capture_candidates(video_id, out_dir):
     """SERMON_OFFSETS_MIN 시점마다 완전히 새 프로세스(브라우저)로 스틸컷을 하나씩 뜬다.
 
-    브라우저 하나를 재사용하며 여러 번 무거운 유튜브 페이지를 오가면 이 실행
-    환경(GitHub Actions)에서 Chromium이 통째로 멈추는 문제가 실제로 확인됨
-    (2026-08-25~26, --disable-dev-shm-usage로도 해결 안 됨. Playwright 자체
-    60초 timeout도 안 먹힘 = 브라우저/드라이버 프로세스 자체가 무응답이 됐다는
-    뜻이라 Python 코드로는 손쓸 방법이 없었음). 그래서 사진 한 장마다 완전히
-    새 subprocess(=새 브라우저)로 격리하고, 외부에서 subprocess.run(timeout=...)
-    으로 확실하게 강제종료한다. 한 장이 죽어도 나머지 캡처는 영향받지 않고,
-    최소 1장이라도 건지는 게 목표(전부 아니면 전무보다 낫다).
+    처음엔 "브라우저 재사용이 문제"라고 의심했지만, 완전히 새 브라우저로 5번
+    다 시도해도 매번 정확히 90초(개별 워커 타임아웃)를 꽉 채우고 죽는 걸
+    확인(2026-08-26)하면서 진짜 원인이 따로 있다는 게 드러남 — URL에
+    &t=Ns를 붙여 여는 방식 자체가 이 실행 환경(GitHub Actions)에서 100%
+    걸림(워커 쪽 docstring 참고, capture_stills_worker.py는 이제 &t=를 안 쓰고
+    JS로 currentTime을 설정함). 그래도 프로세스 격리 자체는 유지한다 —
+    한 장이 어떤 이유로든 죽어도(외부에서 subprocess.run(timeout=...)으로
+    강제종료) 나머지 캡처는 영향받지 않고, 최소 1장이라도 건지는 게 목표
+    (전부 아니면 전무보다 낫다).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamps = sorted(set(offset_min * 60 for offset_min in SERMON_OFFSETS_MIN))
