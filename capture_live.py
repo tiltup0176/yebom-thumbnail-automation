@@ -6,6 +6,14 @@ Claude Code와 무관하게 단독 실행 가능. 매주 일요일 13:03(KST)에
 라이브 스트림을 잡는 게 아니라, 이미 종료되어 일반 다시보기(VOD)가 된 "오늘자 영상"을
 채널에서 찾아 그 안에서 설교 구간을 찾아 스틸컷을 뜬다.
 
+중요(2026-08-26): 영상 탐색(채널 목록, 제목 파싱)은 Playwright로 하지만, 실제
+스틸컷은 브라우저 스크린샷이 아니라 yt-dlp+ffmpeg로 뜬다. GitHub Actions의
+공유 IP가 구글에 봇으로 이미 분류돼 있어서, 헤드리스 브라우저로 실제 플레이어를
+띄우면 100% "로그인해서 로봇이 아님을 확인하세요"/reCAPTCHA 차단 화면만 찍힘
+(og:title 같은 메타 태그는 차단 없이 그대로 내려오기 때문에 영상 탐색 자체는
+멀쩡했음 — 그래서 한동안 원인 파악이 오래 걸렸음). yt-dlp의 android 클라이언트는
+모바일 앱 내부 API를 흉내내서 이 차단을 우회한다.
+
 흐름:
   1) 채널에서 가장 최근 주일 날짜(YYYYMMDD)가 제목에 들어간 최신 영상을 탐색 (최대 20분 재시도 —
      방송 종료 직후 YouTube가 다시보기로 전환 처리하는 데 시간이 걸릴 수 있음)
@@ -61,7 +69,12 @@ POLL_INTERVAL_S = 3
 TG_TEXT_TIMEOUT_S = 30
 TG_UPLOAD_TIMEOUT_S = 60
 
-CAPTURE_WORKER_SCRIPT = HERE / "capture_stills_worker.py"
+# yt-dlp 기본 클라이언트(웹)는 GitHub Actions IP에서 403/차단 남. android
+# 클라이언트는 웹 플레이어가 아니라 모바일 앱 내부 API를 흉내내는 방식이라
+# "로그인해서 로봇이 아님을 확인하세요" 게이트를 그대로 우회함.
+YTDLP_CLIENT = "android"
+YTDLP_DOWNLOAD_TIMEOUT_S = 180
+FFMPEG_FRAME_TIMEOUT_S = 30
 
 
 REQUIRED_ENV_KEYS = [
@@ -183,42 +196,58 @@ def extract_info(page):
     }
 
 
-SHOT_TIMEOUT_S = 90  # 후보 사진 한 장 캡처(새 프로세스+새 브라우저)당 강제 시간제한
-
-
 def capture_candidates(video_id, out_dir):
-    """SERMON_OFFSETS_MIN 시점마다 완전히 새 프로세스(브라우저)로 스틸컷을 하나씩 뜬다.
+    """SERMON_OFFSETS_MIN 시점의 스틸컷을 yt-dlp+ffmpeg로 뜬다 (브라우저 스크린샷 아님).
 
-    처음엔 "브라우저 재사용이 문제"라고 의심했지만, 완전히 새 브라우저로 5번
-    다 시도해도 매번 정확히 90초(개별 워커 타임아웃)를 꽉 채우고 죽는 걸
-    확인(2026-08-26)하면서 진짜 원인이 따로 있다는 게 드러남 — URL에
-    &t=Ns를 붙여 여는 방식 자체가 이 실행 환경(GitHub Actions)에서 100%
-    걸림(워커 쪽 docstring 참고, capture_stills_worker.py는 이제 &t=를 안 쓰고
-    JS로 currentTime을 설정함). 그래도 프로세스 격리 자체는 유지한다 —
-    한 장이 어떤 이유로든 죽어도(외부에서 subprocess.run(timeout=...)으로
-    강제종료) 나머지 캡처는 영향받지 않고, 최소 1장이라도 건지는 게 목표
-    (전부 아니면 전무보다 낫다).
+    Playwright로 실제 플레이어를 렌더링해서 스크린샷 뜨는 방식은 여러 날에
+    걸쳐 별별 원인(브라우저 재사용, &t= URL, video.play()의 Promise가 안
+    끝남 등)을 의심하며 고쳐봤지만, 실제로 캡처된 사진을 보고서야 진짜
+    원인을 확인함(2026-08-26) — 구글이 GitHub Actions의 공유 IP를 이미
+    봇으로 분류해놔서, 헤드리스 브라우저로 접속하면 매번 reCAPTCHA
+    "비정상적인 트래픽 감지" 화면이나 "로그인해서 로봇이 아님을
+    확인하세요" 게이트만 나옴 (그게 실제 영상인 줄 알고 계속 코드만
+    고치고 있었음). og:title 같은 메타 태그는 이 차단 없이 내려오기
+    때문에 영상 탐색(find_todays_video)은 계속 멀쩡했던 것.
+
+    yt-dlp의 android 클라이언트는 웹 플레이어가 아니라 유튜브 모바일 앱
+    내부 API를 흉내내는 방식이라 이 차단을 그대로 우회한다(이미 대기화면
+    밝기 진단 기능에서 검증된 방식).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     timestamps = sorted(set(offset_min * 60 for offset_min in SERMON_OFFSETS_MIN))
+    start, end = timestamps[0], timestamps[-1]
+
+    video_path = out_dir / f"_dl_{video_id}.mp4"
+    print(f"[진행] yt-dlp로 {start}~{end}s 구간 다운로드 중...")
+    subprocess.run(
+        [
+            "yt-dlp",
+            "--extractor-args", f"youtube:player_client={YTDLP_CLIENT}",
+            "-f", "best[height<=480]",
+            "--download-sections", f"*{start}-{end}",
+            "-o", str(video_path),
+            f"https://www.youtube.com/watch?v={video_id}",
+        ],
+        check=True, timeout=YTDLP_DOWNLOAD_TIMEOUT_S,
+    )
+    print("[진행] 다운로드 완료, 프레임 추출 중...")
 
     paths = []
     for i, t in enumerate(timestamps, start=1):
+        rel_t = t - start
         path = out_dir / f"candidate_{len(paths) + 1}.jpg"
-        print(f"[진행] 캡처 {i}/{len(timestamps)}: t={t}s, 새 프로세스로 시작...")
-        try:
-            result = subprocess.run(
-                [sys.executable, str(CAPTURE_WORKER_SCRIPT), video_id, str(t), str(path)],
-                timeout=SHOT_TIMEOUT_S,
-            )
-            if result.returncode != 0:
-                print(f"[진행] 캡처 {i}/{len(timestamps)}: 워커 실패 (exit {result.returncode}), 건너뜀")
-                continue
-        except subprocess.TimeoutExpired:
-            print(f"[진행] 캡처 {i}/{len(timestamps)}: {SHOT_TIMEOUT_S}초 넘어서 강제종료, 건너뜀")
-            continue
-        paths.append(path)
-        print(f"[진행] 캡처 {i}/{len(timestamps)}: 완료 ({len(paths)}번째 후보로 저장)")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", str(rel_t), "-i", str(video_path),
+             "-frames:v", "1", "-q:v", "2", str(path)],
+            capture_output=True, timeout=FFMPEG_FRAME_TIMEOUT_S,
+        )
+        if result.returncode == 0 and path.exists():
+            paths.append(path)
+            print(f"[진행] 캡처 {i}/{len(timestamps)}: 완료 (t={t}s, {len(paths)}번째 후보로 저장)")
+        else:
+            print(f"[진행] 캡처 {i}/{len(timestamps)}: ffmpeg 실패(exit {result.returncode}), 건너뜀")
+
+    video_path.unlink(missing_ok=True)
     return paths
 
 
