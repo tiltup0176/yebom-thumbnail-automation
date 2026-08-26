@@ -5,16 +5,18 @@ subprocess.run(timeout=...)으로 실행한다. 완전히 새 프로세스+새 �
 격리해서, 하나가 죽어도(외부에서 강제종료됨) 나머지 사진 캡처는 영향받지
 않는다.
 
-중요: URL에 &t=Ns 타임스탬프를 붙여서 여는 방식(wait_until을 domcontentloaded든
-commit이든 뭘로 해도)은 이 실행 환경(GitHub Actions)에서 100% 재현되는
-행(hang)이 있었음(2026-08-26 실측 — 새 브라우저로 5번씩, 두 번의 워크플로
-실행 모두 매번 정확히 개별 타임아웃을 꽉 채움). 그래서 &t= 파라미터 없이
-일반 영상 페이지만 열고(이 nav는 모든 테스트에서 항상 빠르고 안정적이었음),
-JS로 직접 탐색한다. 처음엔 로드 직후 바로 currentTime을 옮겼다가 플레이어
-자체 오류("문제가 발생했습니다")가 났는데, video.readyState가 아직 안 올라간
-상태(HAVE_NOTHING)에서 seek해서 그런 것으로 확인됨 — play()를 먼저 부르고
-readyState >= 2(HAVE_CURRENT_DATA)가 될 때까지 기다린 뒤에 seek하니 로컬
-에서 에러 없이 정상 캡처됨.
+중요(2026-08-26에 실제로 겪은 삽질 기록 — 다음에 비슷한 hang 만나면 여기부터
+볼 것): 한동안 &t=Ns URL, /dev/shm, 브라우저 재사용 등을 의심하며 헤맸는데,
+워커 내부에 단계별 print를 찍어보고 나서야 진짜 원인을 찾음 —
+`page.evaluate("video.play()")` 이 한 줄이 84초 넘게 멈춰있었음.
+video.play()는 Promise를 반환하고, Playwright의 page.evaluate()는 반환값이
+Promise면 그게 끝날 때까지 자동으로 기다리는데, 이 실행 환경에서는 그
+Promise가 영원히 settle이 안 됨(로컬 맥에서는 금방 resolve돼서 이 문제가
+전혀 안 보였음). 고치는 법: JS를 화살표 함수로 감싸서 최종 반환값을
+undefined로 만들면 evaluate가 그 안의 Promise를 기다리지 않고 바로 리턴함
+— `"() => { v.play(); }"`처럼. &t=Ns URL 자체는 문제가 아니었을 수도 있음
+(그때도 결국 play() 호출이 있었으니 같은 원인이었을 가능성이 큼) — 그래도
+JS seek 방식(일반 페이지 열고 currentTime 직접 설정)은 그대로 유지한다.
 
 사용법: python capture_stills_worker.py <video_id> <timestamp_seconds> <out_path>
 성공하면 out_path에 스크린샷을 남기고 종료 코드 0.
@@ -40,7 +42,12 @@ def capture_one(video_id, t, out_path):
         dismiss_consent(page)
         print("[워커] play() 호출", flush=True)
         try:
-            page.evaluate("document.querySelector('video')?.play()")
+            # 주의: video.play()는 Promise를 반환하고, page.evaluate()는 반환값이
+            # Promise면 그게 끝날 때까지 자동으로 기다림. 이 환경에서는 그 Promise가
+            # 영원히 안 끝나는 걸 실측으로 확인(2026-08-26 — 이 한 줄에서 84초 동안
+            # 멈춰있었음, 로컬에선 빨리 resolve돼서 안 보였음). IIFE로 감싸서 반환값을
+            # undefined로 만들면 evaluate가 Promise를 기다리지 않고 바로 리턴한다.
+            page.evaluate("() => { document.querySelector('video')?.play(); }")
         except Exception as e:
             print(f"[워커] play() 예외: {e}", flush=True)
         print("[워커] readyState 대기 시작", flush=True)
