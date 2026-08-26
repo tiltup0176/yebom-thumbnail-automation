@@ -9,7 +9,10 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # 사진 선택(최대 2h) + 승인(최대 2h) 폴링을 다 합치면 정상 흐름에서도 4시간을
+    # 넘을 수 있어서(2026-08-26 발견: 기존 150분짜리 job timeout이 정상 흐름조차
+    # 못 버틸 수 있는 값이었음) 여유 있게 잡는다.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +27,7 @@ jobs:
 
       - name: 캡처 + 텔레그램 연동 + 썸네일 업로드
         env:
+          PYTHONUNBUFFERED: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}

@@ -20,7 +20,8 @@ import importlib.util
 import json
 import os
 import re
-import signal
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -61,32 +62,8 @@ POLL_INTERVAL_S = 3
 TG_TEXT_TIMEOUT_S = 30
 TG_UPLOAD_TIMEOUT_S = 60
 
-STILLS_CAPTURE_TIMEOUT_S = 300  # 후보 사진 캡처 단계 전체의 강제 시간제한
-
-
-class StepTimeout(Exception):
-    pass
-
-
-def run_with_timeout(seconds, fn, *args, **kwargs):
-    """지정 시간을 넘기면 강제로 중단시킨다(SIGALRM 기반, Unix 전용).
-
-    page.evaluate() 등 Playwright의 일부 호출은 자체 timeout 인자가 없어서,
-    브라우저가 응답을 안 주면 무한 대기할 수 있음(2026-08-25 실제로 후보 사진
-    캡처 단계가 원인 불명으로 10분 넘게 멈춘 사고 발생). 어떤 호출이 원인이든
-    이 단계 전체에 상한을 걸어서, 조용히 영원히 멈추는 대신 최소한 에러로
-    실패해서 사용자에게 알림이 가도록 한다.
-    """
-    def _raise_timeout(signum, frame):
-        raise StepTimeout(f"{seconds}초 제한 시간을 초과함")
-
-    old_handler = signal.signal(signal.SIGALRM, _raise_timeout)
-    signal.alarm(seconds)
-    try:
-        return fn(*args, **kwargs)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
+STILLS_CAPTURE_TIMEOUT_S = 300  # 후보 사진 캡처 단계 전체의 강제 시간제한 (subprocess 강제종료 기준)
+CAPTURE_WORKER_SCRIPT = HERE / "capture_stills_worker.py"
 
 
 REQUIRED_ENV_KEYS = [
@@ -123,6 +100,7 @@ def dismiss_consent(page):
 
 def find_todays_video(page, today):
     """채널의 다시보기 목록에서 제목에 오늘 날짜가 들어간 영상을 찾는다."""
+    print("[진행] 채널 목록 페이지 이동 중...")
     page.goto(CHANNEL_STREAMS_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(3000)
     dismiss_consent(page)
@@ -131,10 +109,13 @@ def find_todays_video(page, today):
     for vid in re.findall(r'"videoId":"([\w-]{11})"', html):
         if vid not in ids:
             ids.append(vid)
+    print(f"[진행] 후보 영상 {len(ids[:8])}개 발견, 하나씩 확인 중...")
     for vid in ids[:8]:
+        print(f"[진행]   확인 중: {vid}")
         page.goto(f"https://www.youtube.com/watch?v={vid}", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(2000)
         info = extract_info(page)
+        print(f"[진행]   -> sermon_date={info.get('sermon_date')} (목표: {today})")
         if info.get("sermon_date") == today:
             return info
     return None
@@ -213,13 +194,16 @@ def capture_stills_from_vod(page, video_id, out_dir):
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print("[진행] 캡처: 영상 페이지 이동 중...")
     page.goto(f"https://www.youtube.com/watch?v={video_id}", wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(3000)
     dismiss_consent(page)
+    print("[진행] 캡처: duration 읽는 중...")
     try:
         duration = page.evaluate("document.querySelector('video')?.duration")
     except Exception:
         duration = None
+    print(f"[진행] 캡처: duration={duration}")
     if not duration or duration < 60:
         duration = DEFAULT_DURATION_S
 
@@ -231,6 +215,7 @@ def capture_stills_from_vod(page, video_id, out_dir):
 
     paths = []
     for i, t in enumerate(timestamps, start=1):
+        print(f"[진행] 캡처 {i}/{len(timestamps)}: t={t}s 페이지 이동...")
         page.goto(f"https://www.youtube.com/watch?v={video_id}&t={t}s", wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(4000)
         dismiss_consent(page)
@@ -245,11 +230,13 @@ def capture_stills_from_vod(page, video_id, out_dir):
         page.wait_for_timeout(3500)
         path = out_dir / f"candidate_{i}.jpg"
         video = page.locator("video").first
+        print(f"[진행] 캡처 {i}/{len(timestamps)}: 스크린샷 찍는 중...")
         try:
             video.screenshot(path=str(path), type="jpeg", quality=95)
         except Exception:
             page.screenshot(path=str(path), type="jpeg", quality=95)
         paths.append(path)
+        print(f"[진행] 캡처 {i}/{len(timestamps)}: 완료")
     return paths
 
 
@@ -351,21 +338,32 @@ def main():
         page = browser.new_page(viewport={"width": 1600, "height": 900})
 
         info = wait_for_todays_video(page)
+        browser.close()
         if not info:
             send_message(
                 env,
                 "오늘자 영상을 20분 넘게 기다렸는데 아직 채널에 안 보여요 "
                 "(다시보기 전환이 늦어지고 있을 수 있어요). Claude Code에서 직접 확인해주세요.",
             )
-            browser.close()
             return
 
-        send_message(env, f"영상 찾았어요: {info['raw_title']}\n후보 사진 캡처 중...")
+    send_message(env, f"영상 찾았어요: {info['raw_title']}\n후보 사진 캡처 중...")
 
-        photos = run_with_timeout(
-            STILLS_CAPTURE_TIMEOUT_S, capture_stills_from_vod, page, info["video_id"], out_dir
-        )
-        browser.close()
+    # 후보 사진 캡처는 별도 프로세스에서 실행하고 subprocess.run(timeout=...)으로
+    # 외부에서 강제종료한다. Playwright 동기 API의 일부 내부 호출(page.evaluate 등)이
+    # 락/퓨처 대기 방식이라 signal.alarm으로는 못 끊는 경우가 실제로 있었음
+    # (2026-08-25~26 실행이 원인 불명으로 2시간 넘게 멈춘 사고). yt-dlp/ffmpeg에
+    # 쓰던 것과 같은, 이미 검증된 프로세스 격리 방식으로 통일.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [sys.executable, str(CAPTURE_WORKER_SCRIPT), info["video_id"], str(out_dir)],
+        timeout=STILLS_CAPTURE_TIMEOUT_S,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"후보 사진 캡처 워커가 실패함 (exit code {result.returncode})")
+    photos = sorted(out_dir.glob("candidate_*.jpg"), key=lambda p: int(p.stem.split("_")[1]))
+    if not photos:
+        raise RuntimeError("캡처 워커는 끝났는데 후보 사진 파일이 하나도 없음")
 
     (out_dir / "info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2))
 
