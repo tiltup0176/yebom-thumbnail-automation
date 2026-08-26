@@ -334,7 +334,7 @@ def main():
     send_message(env, "썸네일 자동화 스크립트 시작했어요. 오늘자 영상을 찾는 중...")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
         page = browser.new_page(viewport={"width": 1600, "height": 900})
 
         info = wait_for_todays_video(page)
@@ -478,3 +478,7 @@ if __name__ == "__main__":
             )
         except Exception:
             pass
+        # 실패했는데도 종료 코드가 0으로 나가서 GitHub Actions에 "success"로
+        # 잘못 표시되던 버그(2026-08-26 발견). 반드시 실패로 남겨야 나중에
+        # Actions 탭에서 성공/실패를 신뢰할 수 있음.
+        sys.exit(1)

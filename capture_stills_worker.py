@@ -21,7 +21,11 @@ def main():
     out_dir = Path(sys.argv[2])
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # GitHub Actions 기본 /dev/shm이 64MB뿐이라 몇 번 navigation 후 Chromium이
+        # 완전히 멈추는 경우가 흔함(2026-08-26 실제 확인: Playwright 자체 60초
+        # timeout도 안 먹히고 외부 subprocess timeout까지 꽉 채움 = 브라우저 프로세스
+        # 자체가 무응답 상태였다는 뜻). /tmp를 대신 쓰게 해서 회피.
+        browser = p.chromium.launch(headless=True, args=["--disable-dev-shm-usage"])
         page = browser.new_page(viewport={"width": 1600, "height": 900})
         capture_stills_from_vod(page, video_id, out_dir)
         browser.close()
