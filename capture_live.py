@@ -70,11 +70,17 @@ TG_TEXT_TIMEOUT_S = 30
 TG_UPLOAD_TIMEOUT_S = 60
 
 # yt-dlp 기본 클라이언트(웹)는 GitHub Actions IP에서 403/차단 남. android
-# 클라이언트는 웹 플레이어가 아니라 모바일 앱 내부 API를 흉내내는 방식이라
-# "로그인해서 로봇이 아님을 확인하세요" 게이트를 그대로 우회함.
+# 클라이언트는 웹 플레이어가 아니라 모바일 앱 내부 API를 흉내내는 방식이지만,
+# 그것만으로는 부족함이 확인됨(2026-08-26 — "Sign in to confirm you're not
+# a bot" 에러가 android 클라이언트에서도 그대로 남) — GitHub Actions 공유
+# IP 자체가 너무 심하게 차단당해 있어서, 로그인 쿠키 없이는 android
+# 클라이언트도 뚫지 못함. 그래서 로그인 세션 쿠키를 같이 써서 로그인된
+# 것처럼 요청한다 (쿠키 파일은 GitHub Actions에서 YOUTUBE_COOKIES 시크릿을
+# 워크플로가 파일로 복원해줌; 로컬에는 보통 없으므로 있을 때만 사용).
 YTDLP_CLIENT = "android"
 YTDLP_DOWNLOAD_TIMEOUT_S = 180
 FFMPEG_FRAME_TIMEOUT_S = 30
+YOUTUBE_COOKIES_PATH = HERE / "youtube_cookies.txt"
 
 
 REQUIRED_ENV_KEYS = [
@@ -219,9 +225,11 @@ def capture_candidates(video_id, out_dir):
 
     video_path = out_dir / f"_dl_{video_id}.mp4"
     print(f"[진행] yt-dlp로 {start}~{end}s 구간 다운로드 중...")
+    cookies_args = ["--cookies", str(YOUTUBE_COOKIES_PATH)] if YOUTUBE_COOKIES_PATH.exists() else []
     subprocess.run(
         [
             "yt-dlp",
+            *cookies_args,
             "--extractor-args", f"youtube:player_client={YTDLP_CLIENT}",
             "-f", "best[height<=480]",
             "--download-sections", f"*{start}-{end}",

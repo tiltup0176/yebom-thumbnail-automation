@@ -25,6 +25,16 @@ jobs:
           python -m pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
+      - name: 유튜브 쿠키 파일 생성
+        # GitHub Actions 공유 IP가 유튜브에 봇으로 차단당해서(yt-dlp도
+        # "Sign in to confirm you're not a bot" 에러 남, 2026-08-26 확인)
+        # 로그인 쿠키 없이는 영상 다운로드 자체가 안 됨. 사용자의 유튜브
+        # 로그인 세션 쿠키를 파일로 복원해서 yt-dlp가 로그인된 것처럼
+        # 요청하게 한다.
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: printf '%s' "$YOUTUBE_COOKIES" > youtube_cookies.txt
+
       - name: 캡처 + 텔레그램 연동 + 썸네일 업로드
         env:
           PYTHONUNBUFFERED: "1"
